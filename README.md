@@ -37,9 +37,12 @@ promotions or an actual customer action.
   mixed: greeting, product search/price and policy retrieval succeeded; budget
   recommendation returned `INVALID_ARGUMENT` and category listing returned
   `GROUNDING_FAILED`.
-- **F-06:** future proposals only. See
+- **F-06A Catalog retrieval and grounding reliability:** local implementation
+  and offline verification complete; **Gate V pending human review**. Supported
+  BRL punctuation, bounded customer-budget provenance and complete scoped
+  minimum checks have regression coverage. No real-model run was performed.
+- **Other F-06 workstreams:** future proposals only. See
   [docs/architecture/F-06-proposed-roadmap.md](docs/architecture/F-06-proposed-roadmap.md).
-  No F-06 runtime implementation exists.
 
 ## Run locally
 
@@ -306,6 +309,14 @@ benchmark remains offline by default; real mode is implemented but not authorize
 See [F-05 verification](docs/verification/F-05-verification.md) for exact
 commands, the acceptance mapping and the owner-observed real Nemotron outcomes.
 
+F-06A offline verification observed **736 passed, 0 failed, 0 skipped**: all 633
+unchanged baseline tests plus 103 additive regressions. Tests first reproduced
+punctuation, budget-provenance and partial-result comparison failures. A scripted
+model with the actual read-only tool worker rejected the default ten-result
+minimum claim and accepted the correct R$ 429,90 minimum from both complete
+33-product query/category searches. This is local retrieval/guard evidence,
+not live model-quality evidence. See [F-06A verification](docs/verification/F-06A-verification.md).
+
 The additional F-04 catalog conversation reached the model and retrieved products,
 but its final answer failed the grounding guard and became a safe fallback. The
 four retained recordings include that failure and three historical conversations;
@@ -333,6 +344,18 @@ evidence and are not part of `pytest`.
   truth of every sentence or prove every product/price pairing. The original
   combined live example includes unsupported wording about a discount being
   applied “no checkout”; it is retained and identified in the evidence.
+- F-06A uses conservative wording for budget references and minimum claims.
+  Repeating a budget requires the entire current customer message to be an
+  affirmative declaration such as `Meu orçamento é R$ 500,00.`. The answer must
+  start with `Seu orçamento é R$ 500,00.` and can then contain only explicit
+  `FULL PRODUCT NAME por R$ PRICE.` clauses with supported product/price pairs.
+  Longer customer requests can still receive verified product prices without
+  repeating their budget. Scoped minimum answers require one complete matching
+  current-turn search and an exact category/query template; missing metadata,
+  truncation, price filters and ambiguous scope fail closed. The 50-result and
+  12 KiB tool-output bounds remain. Recognized comparison phrases are guarded;
+  arbitrary natural-language entailment and every possible paraphrase are not
+  solved. No live-provider adherence or quality improvement is claimed.
 - Prompt injection is treated as a trust boundary: customer text, CSV fields,
   PDF content and tool results are data. Mocked adversarial tests provide
   bounded evidence, not a claim that all attacks or hallucinations are solved.
@@ -379,9 +402,11 @@ limitations; generated code or prose alone is not treated as proof of success.
 
 Repository: [Sharpshooter171/music-store-ai-agent](https://github.com/Sharpshooter171/music-store-ai-agent).
 The public F-05 release is `main @ 0a5a8bcaede2e8631a71715c32a3f14449b3e005`,
-merged from PR #5 with Gate V approved and documented limitations. F-06 is
-documented only in
+merged from PR #5 with Gate V approved and documented limitations. Other F-06
+workstreams remain proposed in
 [docs/architecture/F-06-proposed-roadmap.md](docs/architecture/F-06-proposed-roadmap.md).
+F-06A is an authorized local change against `6d83c45484d31284fc6653b72d5b77c07ed6a888`,
+pending human Gate V review; it has not been committed or published by this work.
 
 See [F-05 verification](docs/verification/F-05-verification.md),
 [final delivery review](docs/verification/FINAL-DELIVERY-REVIEW.md) and the

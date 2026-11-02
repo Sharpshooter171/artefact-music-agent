@@ -12,7 +12,7 @@ from time import monotonic
 from app.agent.deadline import Deadline
 
 from app.agent.prompt import SYSTEM_PROMPT
-from app.agent.tool_registry import ToolRegistry, safe_tool_error_code
+from app.agent.tool_registry import ToolRegistry, parse_and_validate_arguments, safe_tool_error_code
 
 TOOL_NAMES = frozenset({
     "search_products", "get_product_details", "list_categories", "search_store_policies",
@@ -105,6 +105,8 @@ class Orchestrator:
         messages = [{"role": "system", "content": SYSTEM_PROMPT},
                     *self.history, {"role": "user", "content": text}]
         evidence: dict[str, list[dict]] = {}
+        # Private current-turn provenance; never alter tool envelopes or diagnostics.
+        searches: list[tuple[dict, dict]] = []
         used_ids: set[str] = set()
         tool_count = 0
         tool_bytes = 0
@@ -200,13 +202,17 @@ class Orchestrator:
                         failure = "NO_EVIDENCE"
                     else:
                         evidence.setdefault(name, []).append(result)
+                        if name == "search_products":
+                            params, code = parse_and_validate_arguments(name, call["function"]["arguments"])
+                            if code is None:
+                                searches.append((params, result))
                 # Do not ask a model to repair/override failed or empty source evidence.
                 if failure:
                     answer = self._fail(failure)
                     break
             else:
                 _check_turn(deadline)
-                answer = self._validate_final(message.get("content"), evidence)
+                answer = self._validate_final(message.get("content"), evidence, text, searches)
                 _check_turn(deadline)
                 break
         else:
@@ -280,7 +286,7 @@ class Orchestrator:
                         and isinstance(c.get("message"), str) and pages(c.get("pages"))
                         for c in cautions))
 
-    def _validate_final(self, content, evidence):
+    def _validate_final(self, content, evidence, customer_text="", searches=()):
         self.last_final_json_compliant = False
         try:
             if not isinstance(content, str) or len(content.encode("utf-8")) > 12000:
@@ -314,7 +320,13 @@ class Orchestrator:
             if not sources or not set(sources).issubset(evidence):
                 raise ValueError
             results = [result for name in sources for result in evidence[name]]
-            if not self._numbers_supported(text, results):
+            products = [p for r in evidence.get("search_products", []) for p in r["data"]["products"]
+                        if "search_products" in sources]
+            products += [r["data"]["product"] for r in evidence.get("get_product_details", [])
+                         if "get_product_details" in sources]
+            if not self._numbers_supported(text, results, customer_text, products):
+                raise ValueError
+            if not _minimum_supported(text, sources, searches):
                 raise ValueError
             if re.search(r"(?<![\d.,])\b\d+(?:\.\d{3})*\s*(?:unidades?|peças?|em estoque)\b|stock_quantity", text, re.I):
                 raise ValueError
@@ -342,9 +354,10 @@ class Orchestrator:
             return self._fail("GROUNDING_FAILED")
 
     @staticmethod
-    def _numbers_supported(text, results):
+    def _numbers_supported(text, results, customer_text="", products=()):
         # This checks numeric and currency support, not arbitrary semantic truth.
         # Source envelopes remain unchanged in model messages.
+        text = _without_verified_budget(text, customer_text, products)
         source = json.dumps(results, ensure_ascii=False)
         cents = set()
 
@@ -376,14 +389,119 @@ class Orchestrator:
                     cents.add(int(major) * 100 + int(minor))
         if re.search(r"\d[\d.,]*\s*reais\b", text, re.I):
             return False
-        for raw in re.findall(r"R\$\s*([\d.,]+)", text):
-            raw = raw.rstrip(".")
-            if not re.fullmatch(r"(?:\d+|\d{1,3}(?:\.\d{3})+),\d{2}", raw):
-                return False
-            major, minor = raw.replace(".", "").split(",")
-            if int(major) * 100 + int(minor) not in cents:
-                return False
+        amounts = _money_amounts(text)
+        return amounts is not None and all(amount in cents for amount in amounts)
+
+
+def _brl_cents(raw, *, allow_whole=False):
+    """Parse a complete unsigned BRL token; only trailing punctuation is separable."""
+    original = raw
+    raw = original.rstrip(".,")
+    whole = r"(?:[0-9]+|[0-9]{1,3}(?:\.[0-9]{3})+)"
+    if re.fullmatch(whole + r",[0-9]{2}", raw):
+        major, minor = raw.replace(".", "").split(",")
+        return int(major) * 100 + int(minor)
+    integer = original.rstrip(".")
+    if allow_whole and re.fullmatch(whole, integer):
+        return int(integer.replace(".", "")) * 100
+    return None
+
+
+def _money_amounts(text):
+    amounts = []
+    for marker in re.finditer(r"R\$", text):
+        if text[:marker.start()].rstrip().endswith(("-", "+", "−")):
+            return None
+        token = re.match(r"\s*([0-9.,]+)", text[marker.end():])
+        if token is None:
+            return None
+        amount = _brl_cents(token[1])
+        tail = text[marker.end() + token.end():]
+        if (amount is None or (tail and tail[0].isalnum())
+                or re.match(r"\s*[-+*/−]\s*[0-9]", tail)):
+            return None
+        amounts.append(amount)
+    return amounts
+
+
+def _without_verified_budget(text, customer_text, products):
+    """Permit a bounded budget answer without letting prose reuse its amount.
+
+    A complete affirmative declaration avoids guessing through alternatives or
+    retractions. Other requests can still receive prices without repeating a budget.
+    """
+    clause = re.match(r"\ASeu orçamento é R\$\s*([0-9.]+,[0-9]{2})\.(?=\s|$)", text)
+    if clause is not None:
+        declaration = re.fullmatch(
+            r"(?:Meu orçamento (?:é|de)|Tenho (?:no máximo|até)|Posso gastar até)"
+            r"\s+R\$\s*((?:[0-9]+|[0-9]{1,3}(?:\.[0-9]{3})+)(?:,[0-9]{2})?)\.?",
+            customer_text, re.I)
+        if (declaration is None or _brl_cents(declaration[1], allow_whole=True) != _brl_cents(clause[1])):
+            raise ValueError
+        remaining = text[clause.end():].strip()
+        # Each subsequent clause must name a retrieved product and its own exact
+        # price. Free prose could turn "esse valor" into a fabricated product price.
+        pending = remaining
+        while pending:
+            for product in products:
+                priced = re.match(re.escape(product["name"]) + r" por R\$\s*([0-9.,]+)\.(?=\s|$)", pending)
+                if priced and _brl_cents(priced[1]) == product["price"]["amount_cents"]:
+                    pending = pending[priced.end():].strip()
+                    break
+            else:
+                raise ValueError
+        return remaining
+    if re.search(r"\borçamento\b|\bseu limite\b|\bvocê pode (?:gastar|pagar)\b", text, re.I) and "R$" in text:
+        raise ValueError
+    return text
+
+
+def _minimum_supported(text, sources, searches):
+    """Validate bounded comparison wording, never route customer intent.
+
+    General natural-language scope cannot be proven by these tool contracts.
+    Recognized minimum claims outside the exact scoped forms fail closed.
+    """
+    if not re.search(r"mais\s+(?:barat[oa]s?|em\s+conta|econ[oô]mic[oa]s?|acess[ií]ve(?:l|is)|baix[oa]s?)|"
+                     r"menor(?:es)?\s+(?:preç[oa]s?|valor(?:es)?|custos?)|"
+                     r"preço\s+m[ií]nimo|custa(?:m)?\s+menos", text, re.I):
         return True
+    claim = re.fullmatch(
+        r'(?:Na categoria (?P<category>[^\n,]+)|Na busca por "(?P<query>[^"\n]+)")'
+        r", o menor preço disponível é (?P<name>[^\n]+) por R\$ (?P<price>[0-9.,]+)\.", text.strip())
+    if claim is None or "search_products" not in sources:
+        return False
+    amount = _brl_cents(claim["price"])
+    if amount is None:
+        return False
+    for params, result in searches:
+        if (params.get("availability", "available") != "available"
+                or params.get("price_min_cents") is not None
+                or params.get("price_max_cents") is not None):
+            continue
+        if claim["category"] is not None:
+            if params.get("category") != claim["category"] or params.get("query") is not None:
+                continue
+        elif params.get("query") != claim["query"] or params.get("category") is not None:
+            continue
+        meta = result.get("meta", {})
+        products = result["data"]["products"]
+        if (not isinstance(meta, dict) or meta.get("truncated") is not False
+                or type(meta.get("returned")) is not int
+                or meta["returned"] != len(products) or len(products) > params.get("limit", 10)
+                or not isinstance(meta.get("snapshot_id"), str) or not meta["snapshot_id"]
+                or len({p["product_id"] for p in products}) != len(products)
+                or any(p["availability"] != "available" for p in products)):
+            continue
+        if claim["category"] is not None and any(
+                not isinstance(p.get("category"), dict)
+                or p["category"].get("name") != claim["category"] for p in products):
+            continue
+        minimum = min(p["price"]["amount_cents"] for p in products)
+        if amount == minimum and any(p["name"] == claim["name"] and
+                                     p["price"]["amount_cents"] == amount for p in products):
+            return True
+    return False
 
 
 class _TurnExpired(BaseException):
