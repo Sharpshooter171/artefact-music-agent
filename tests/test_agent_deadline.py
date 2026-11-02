@@ -38,8 +38,8 @@ def test_deadline_rejects_invalid_budget(seconds):
 
 def test_f05_config_defaults_preserve_existing_free_model():
     config = Config(api_key="synthetic-key")
-    assert config.request_deadline == 20
-    assert config.turn_deadline == 45
+    assert config.request_deadline == 30
+    assert config.turn_deadline == 120
     assert config.max_tokens == 768
     assert config.provider_failover is False
     assert config.model == FREE_MODEL

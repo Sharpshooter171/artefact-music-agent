@@ -136,8 +136,8 @@ configured model or authorized-model allowlist:
 
 | Setting | Default | Bounds |
 | --- | --- | --- |
-| `EMPORIO_LLM_REQUEST_DEADLINE` | 20 seconds | 1–30 seconds |
-| `EMPORIO_LLM_TURN_DEADLINE` | 45 seconds | 5–120 seconds; at least the request deadline |
+| `EMPORIO_LLM_REQUEST_DEADLINE` | 30 seconds | 1–30 seconds |
+| `EMPORIO_LLM_TURN_DEADLINE` | 120 seconds | 5–120 seconds; at least the request deadline |
 | `EMPORIO_LLM_MAX_TOKENS` | 768 | Integer, 128–2048 |
 | `EMPORIO_LLM_PROVIDER_FAILOVER` | `false` | Literal `true` / `false`; same model only |
 
