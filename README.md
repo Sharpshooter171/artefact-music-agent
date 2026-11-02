@@ -1,0 +1,271 @@
+# Music Store AI Agent
+
+A Python customer-service agent that answers in Brazilian Portuguese using a
+music-instrument catalog and a store-policy manual. A real language model chooses
+read-only tools; local Python code validates requests and retrieves the facts.
+
+Customers often combine questions such as instrument availability and payment
+conditions. This prototype connects those two sources in one conversation while
+keeping prices, availability and policy rules traceable. **Music Store AI Agent**
+is the project's independent portfolio identity; **Empório da Música** is the
+fictional store used in the supplied scenario.
+
+## What it does
+
+- Searches instruments by name, exact category, price range and availability.
+- Retrieves product descriptions, specifications and category listings.
+- Finds policy sections covering payment, hours, shipping, returns and warranty,
+  with page references and explicit cautions for conflicting information.
+- Handles combined catalog/policy questions and simple session follow-ups.
+- Redirects unrelated requests and gives a safe pt-BR fallback when evidence,
+  tools or the model service are unavailable.
+
+The interface is a local terminal. Catalog data is a **CSV snapshot**, and the
+manual is a **June 2025 document**. Neither establishes live inventory, current
+promotions or an actual customer action.
+
+## Run locally
+
+Requirements: **Python 3.11+**, `venv` and `pip`. Run the following commands from
+the repository root. Installation downloads dependencies; catalog/index builds,
+tests and `--help` do not need model credentials or model API access.
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -e '.[dev]'
+
+.venv/bin/python -m scripts.build_catalog \
+  --data-dir data/raw \
+  --output data/generated/catalog.sqlite
+
+.venv/bin/python -m scripts.build_policy_index \
+  --input 'resources/políticas_da_loja.pdf' \
+  --output data/generated/policy_index.json
+
+.venv/bin/python -m pytest -q
+.venv/bin/python -m pip check
+.venv/bin/python -m app --help
+```
+
+The supplied inputs must be present at their original paths. Catalog generation
+uses only `desafio_tecnico_ai_eng - categories.csv` and
+`desafio_tecnico_ai_eng - products.csv`; it validates and loads **9 categories
+and 65 products**. Policy generation extracts **28 numbered sections across 8
+pages**, retaining titles, physical page numbers and source provenance. Generated
+artifacts belong in the ignored `data/generated/` directory; the builders leave
+the supplied CSVs and PDF unchanged.
+
+For a new checkout, create the ignored local configuration file:
+
+```bash
+cp .env.example .env
+```
+
+Keep an existing `.env` if you already have one. Edit the file locally, replacing
+the placeholder key and selecting the model used for the successful real runs:
+
+```dotenv
+EMPORIO_LLM_API_KEY=your-openrouter-api-key
+EMPORIO_LLM_BASE_URL=https://openrouter.ai/api/v1
+EMPORIO_LLM_MODEL=nvidia/nemotron-3-ultra-550b-a55b:free
+EMPORIO_LLM_TIMEOUT=30
+```
+
+Then start the conversation:
+
+```bash
+.venv/bin/python -m app
+```
+
+Enter a question in Portuguese; `/sair`, `sair`, `exit`, Ctrl+C or EOF ends the
+session. To display sanitized tool names and error codes:
+
+```bash
+.venv/bin/python -m app --debug-tools
+```
+
+The CLI checks both generated artifacts and configuration before starting. It
+prints build instructions if an artifact is missing or invalid. Startup, exit
+and `--help` make no model request; entering a customer message does.
+
+## Configuration and free-model boundary
+
+The HTTP client uses OpenRouter's Chat Completions endpoint at
+`https://openrouter.ai/api/v1/chat/completions`. The successful live baseline is
+**`nvidia/nemotron-3-ultra-550b-a55b:free`**. The checked-in `.env.example` defaults
+to the also-approved **`openrouter/free`** router alias. Those are the only two
+accepted request model IDs; other models and endpoints are rejected locally.
+
+Every request disables provider fallback and sets zero price caps for prompt,
+completion, request and image pricing. There are no automatic HTTP retries or
+paid-model fallback. An explicit Nemotron request requires that same model ID in
+the response; the free-router alias may return a validated concrete `:free`
+model ID. Nonzero reported usage cost is rejected. These are application-level
+controls; account billing was not independently audited.
+
+Configuration is read from process environment variables and a literal local
+`.env`; process settings take precedence. `OPENROUTER_API_KEY`,
+`OPENROUTER_MODEL` and `OPENROUTER_BASE_URL` are accepted aliases.
+`EMPORIO_LLM_TIMEOUT` accepts 1–30 seconds. Optional artifact overrides are
+`EMPORIO_CATALOG_DB` and `EMPORIO_POLICY_INDEX`. The dotenv reader does not run
+shell commands or expand variables.
+
+## Architecture and tool calling
+
+```mermaid
+flowchart LR
+    User[Portuguese CLI conversation] --> Agent[Bounded orchestrator]
+    Agent <--> Model[OpenRouter free model]
+    Agent --> Registry[Validated four-tool registry]
+    Registry --> Catalog[Read-only SQLite catalog]
+    Registry --> Policies[Local PDF section index]
+    CSV[Original catalog CSVs] --> BuildCatalog[Offline validated import]
+    BuildCatalog --> Catalog
+    PDF[Original policy PDF] --> BuildPolicies[Offline pypdf extraction]
+    BuildPolicies --> Policies
+```
+
+The model interprets intent and chooses function calls. The host accepts only
+the four registered tool names, validates JSON arguments, invokes the local
+function, and sends its result back as a `role="tool"` message with the matching
+call ID. The model then composes a response. A mixed instrument/payment question
+can call both catalog and policy tools within the same turn.
+
+Before displaying a factual answer, the orchestrator checks its final structured
+envelope, current-turn sources and numerical grounding, preserves policy
+cautions, and adds source/snapshot context. Evidence-free greetings,
+clarifications and scope redirects use fixed pt-BR text after the model selects
+the intent. Missing evidence or failed validation produces a fallback.
+
+| Tool | Inputs and behavior |
+| --- | --- |
+| `search_products` | Optional `query` (2–120 characters), exact `category`, `price_min_cents`, `price_max_cents`, `availability` and `limit` (1–50; default 10). At least one query/category/price filter is required. Prices are integer BRL cents. Default availability is `available`; other values are `out_of_stock`, `coming_soon`, `discontinued` and `any`. |
+| `get_product_details` | Positive integer `product_id`, obtained from the catalog. Returns description, specifications, price and availability. |
+| `list_categories` | No arguments. Returns category descriptions and counts of registered products; these counts are not stock units. |
+| `search_store_policies` | `query` (3–240 characters) and optional `limit` (1–5; default 3). Returns original section text, titles, pages, cautions and document provenance. |
+
+Tools return structured success/error envelopes. Unknown tools, extra arguments,
+duplicate JSON keys, booleans used as integers and invalid ranges are rejected.
+Catalog lookups return explicit missing-product/category or unavailable-catalog
+errors; policy lookup returns no matches or an unavailable-policy error when
+appropriate. These conditions do not authorize a guessed answer.
+
+## Technical choices
+
+**SQLite for catalog facts.** Import validates keys, types, relations, prices
+and statuses, then builds a reproducible local snapshot. Queries use bound
+parameters and read-only connections. Availability is derived deterministically:
+only active products with positive recorded stock are available; discontinued
+and coming-soon statuses take precedence. Public results expose availability,
+not exact stock quantities. Search uses normalized tokens and deterministic
+ordering, with a truncation flag.
+
+**Section retrieval for policies.** `pypdf` extracts the supplied manual locally.
+The index is pinned to its expected document version and SHA-256. Explicit topic
+aliases and lexical ranking select sections without embeddings, a vector
+database or another model call. Contact and installment contradictions remain
+visible; defect exchange and statutory warranty remain separate procedures.
+
+**Small orchestration layer.** Standard-library HTTPS handles the model protocol;
+`pypdf` is the only runtime dependency. No agent framework is required. Each turn
+is bounded to four model requests, six tool calls, 12 KiB of serialized tool
+results and 4 KiB of customer input. Up to 12 complete prior chat messages are
+retained in memory. Transport request/response sizes and output tokens are also
+bounded. The application does not persist chat history.
+
+## Validation and authentic examples
+
+The F-03 baseline recorded **448 passing deterministic tests** and four
+successful real Nemotron scenarios: catalog, policy, combined and out of scope.
+Catalog and policy scenarios observed actual function calls; the unrelated
+request used no store tool. Earlier free-provider HTTP 404/429 failures remain
+documented alongside the successful evidence.
+
+F-04 re-ran the complete suite with network socket operations blocked:
+**448 passed, 0 failed, 0 skipped** on Python 3.14.4. A fresh temporary clone on
+Python 3.12.12 independently installed dependencies, rebuilt both artifacts,
+passed the same **448 tests**, passed `pip check` and ran `python -m app --help`
+successfully. No private `.env`, key or prebuilt artifact was copied into that
+clone. See the F-04 report for exact commands, timings, the official acceptance
+matrix and the pending reproduction at the final F-04 commit after merge.
+
+The additional F-04 catalog conversation reached the model and retrieved products,
+but its final answer failed the grounding guard and became a safe fallback. The
+four retained recordings include that failure and three historical conversations;
+the combined conversation supplies successful catalog-answer evidence.
+
+- [F-03 execution evidence](docs/verification/F-03-verification.md)
+- [F-04 final verification and acceptance matrix](docs/verification/F-04-verification.md)
+- [Authentic Portuguese conversations](examples/)
+
+The offline suite exercises CSV validation/import, availability and money rules,
+read-only queries, reproducibility, policy extraction/ranking, ambiguity handling,
+tool schemas, mocked HTTP transport, CLI behavior, grounding and abuse/failure
+boundaries. It does not require a private API key. Live model runs are separate
+evidence and are not part of `pytest`.
+
+## Limitations and data handling
+
+- Free inference can be unavailable, rate limited or incompatible with required
+  tool parameters. Successful historical runs do not guarantee future service.
+- Catalog search has no stemming or semantic similarity. Exact categories,
+  spelling and the default result limit affect retrieval. Policy retrieval is
+  tailored to the supplied manual; replacing that PDF requires an explicit
+  source/index update.
+- Source and numeric checks reduce unsupported claims but cannot establish the
+  truth of every sentence or prove every product/price pairing. The original
+  combined live example includes unsupported wording about a discount being
+  applied “no checkout”; it is retained and identified in the evidence.
+- Prompt injection is treated as a trust boundary: customer text, CSV fields,
+  PDF content and tool results are data. Mocked adversarial tests provide
+  bounded evidence, not a claim that all attacks or hallucinations are solved.
+- There is no order/customer lookup, payment, refund, mutation, shipping quote,
+  actual human handoff, WhatsApp integration or deployment. The tools cannot
+  execute arbitrary SQL or shell commands. Session messages and relevant
+  retrieved excerpts are sent to OpenRouter during live conversations; use
+  non-sensitive prompts.
+- `.env`, generated databases/indexes and private traces are ignored by Git.
+  The supplied materials include fictional customer/contact fields and an
+  internal-use policy PDF. Owner authorization to retain and publish those
+  original materials is recorded in the
+  [F-01 dataset decision](docs/plans/F-01-implementation-plan.md) and
+  [F-02 source decision](docs/specs/F-02-policy-retrieval.md). Those permissions
+  do not authorize unrelated real customer data. The application imports only
+  catalog products/categories; the unused customer/order files are not evidence
+  of an implemented feature.
+
+## Repository map
+
+```text
+app/catalog/          CSV validation, SQLite import and catalog tools
+app/policy/           PDF extraction, section ranking and policy tool
+app/agent/            Config, HTTP client, tool registry, orchestration and CLI
+scripts/              Offline catalog and policy-index builders
+tests/                Deterministic pytest suite and sanitized fixtures
+examples/             Recorded Portuguese model conversations
+docs/                 Constitution, feature specs/plans and verification evidence
+data/raw/             Original supplied CSVs
+resources/            Original supplied policy PDF
+data/generated/       Ignored local builds and private execution artifacts
+```
+
+## Coding-assistant disclosure
+
+ChatGPT/Codex assisted with requirements and specification drafting, planning,
+Python implementation, test design, integration troubleshooting, documentation
+and verification commands. The project owner sets architecture, scope,
+acceptance criteria and approval boundaries. Verification reports distinguish
+observed command results, mocked behavior, real-provider evidence and remaining
+limitations; generated code or prose alone is not treated as proof of success.
+
+## Repository and delivery status
+
+Repository: [Sharpshooter171/music-store-ai-agent](https://github.com/Sharpshooter171/music-store-ai-agent).
+The reviewed F-04 planning baseline was
+`7baac223dd86ad51b0c28513210727dc4ad474a2`.
+This README and the examples are included in
+[PR #4](https://github.com/Sharpshooter171/music-store-ai-agent/pull/4).
+Final-commit reproduction is verified separately after merge.
+Publishing the repository does not constitute recruiter submission.
+See the
+[delivery checklist](docs/verification/F-04-verification.md#delivery-checklist).
