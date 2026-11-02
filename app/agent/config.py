@@ -17,6 +17,8 @@ _CONFIG_KEYS = {
     "EMPORIO_LLM_API_KEY", "EMPORIO_LLM_MODEL", "EMPORIO_LLM_BASE_URL",
     "EMPORIO_LLM_TIMEOUT", "OPENROUTER_API_KEY", "OPENROUTER_MODEL",
     "OPENROUTER_BASE_URL", "EMPORIO_CATALOG_DB", "EMPORIO_POLICY_INDEX",
+    "EMPORIO_LLM_REQUEST_DEADLINE", "EMPORIO_LLM_TURN_DEADLINE",
+    "EMPORIO_LLM_MAX_TOKENS", "EMPORIO_LLM_PROVIDER_FAILOVER",
 }
 
 
@@ -34,6 +36,10 @@ class Config:
     model: str = FREE_MODEL
     base_url: str = OPENROUTER_BASE_URL
     timeout: float = 30
+    request_deadline: float = 20
+    turn_deadline: float = 45
+    max_tokens: int = 768
+    provider_failover: bool = False
 
     def __post_init__(self):
         if not isinstance(self.api_key, str) or not self.api_key.strip():
@@ -47,6 +53,19 @@ class Config:
         if (isinstance(self.timeout, bool) or not isinstance(self.timeout, (int, float))
                 or not math.isfinite(self.timeout) or not 1 <= self.timeout <= 30):
             raise ConfigError("INVALID_TIMEOUT")
+        for value, lower, upper, code in (
+            (self.request_deadline, 1, 30, "INVALID_REQUEST_DEADLINE"),
+            (self.turn_deadline, 5, 120, "INVALID_TURN_DEADLINE"),
+        ):
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not lower <= value <= upper or not math.isfinite(value)):
+                raise ConfigError(code)
+        if self.request_deadline > self.turn_deadline:
+            raise ConfigError("INVALID_DEADLINE_ORDER")
+        if type(self.max_tokens) is not int or not 128 <= self.max_tokens <= 2048:
+            raise ConfigError("INVALID_MAX_TOKENS")
+        if type(self.provider_failover) is not bool:
+            raise ConfigError("INVALID_PROVIDER_FAILOVER")
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None,
@@ -72,11 +91,28 @@ class Config:
             timeout = float(setting("EMPORIO_LLM_TIMEOUT", default="30"))
         except (ValueError, TypeError):
             raise ConfigError("INVALID_TIMEOUT") from None
+
+        def number(name, default, code, convert=float):
+            raw = setting(name, default=default)
+            try:
+                if not isinstance(raw, str):
+                    raise ValueError
+                return convert(raw)
+            except (ValueError, TypeError, OverflowError):
+                raise ConfigError(code) from None
+
+        failover = setting("EMPORIO_LLM_PROVIDER_FAILOVER", default="false")
+        if failover not in ("true", "false"):
+            raise ConfigError("INVALID_PROVIDER_FAILOVER")
         config = cls(
             api_key=setting("EMPORIO_LLM_API_KEY", "OPENROUTER_API_KEY", ""),
             model=setting("EMPORIO_LLM_MODEL", "OPENROUTER_MODEL", FREE_MODEL),
             base_url=setting("EMPORIO_LLM_BASE_URL", "OPENROUTER_BASE_URL", OPENROUTER_BASE_URL),
             timeout=timeout,
+            request_deadline=number("EMPORIO_LLM_REQUEST_DEADLINE", "20", "INVALID_REQUEST_DEADLINE"),
+            turn_deadline=number("EMPORIO_LLM_TURN_DEADLINE", "45", "INVALID_TURN_DEADLINE"),
+            max_tokens=number("EMPORIO_LLM_MAX_TOKENS", "768", "INVALID_MAX_TOKENS", int),
+            provider_failover=failover == "true",
         )
         if env is None:
             for name in ("EMPORIO_CATALOG_DB", "EMPORIO_POLICY_INDEX"):

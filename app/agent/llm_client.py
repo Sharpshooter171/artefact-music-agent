@@ -1,12 +1,23 @@
 """Bounded stdlib OpenRouter Chat Completions transport; no automatic retries."""
 from __future__ import annotations
 
+import base64
 from decimal import Decimal, InvalidOperation
+import os
+from pathlib import Path
+import selectors
+import subprocess
+import sys
+from time import monotonic
 import json
 import re
 import socket
 from urllib.error import HTTPError, URLError
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import Request
+
+from app.agent import worker_process
+from app.agent.deadline import Deadline
+from app.agent.http_worker import (MAX_IPC_INPUT, MAX_IPC_OUTPUT, NoRedirect, http_error_code)
 
 from app.agent.config import FREE_MODEL, Config
 
@@ -24,49 +35,72 @@ class ProviderError(Exception):
         super().__init__(f"Serviço de IA indisponível ({code}).")
 
 
-class NoRedirect(HTTPRedirectHandler):
-    """Never forward Authorization to a redirect destination."""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
+def _worker_command():
+    # Absolute code path, isolated imports; neither credentials nor customer data in argv.
+    return [sys.executable, '-I', str(Path(__file__).with_name('http_worker.py').resolve())]
 
 
 class ChatClient:
     def __init__(self, config: Config, opener=None):
         self.config = config
-        self._open = opener if opener is not None else build_opener(NoRedirect()).open
+        # Explicit opener injection is a trusted synchronous offline test seam. The
+        # shipped CLI never supplies it; production always uses an isolated worker.
+        self._open = opener
         self.last_model: str | None = None
         self.last_http_status: int | None = None
         self.last_error_code: str | None = None
         self.last_cost: float | None = None
+        self.last_latency_ms: float | None = None
+        self.last_diagnostic: dict = {}
 
     def complete(self, messages: list[dict], tools: list[dict]) -> dict:
+        return self.complete_with_deadline(messages, tools, None)
+
+    def complete_with_deadline(self, messages: list[dict], tools: list[dict],
+                               deadline: Deadline | None) -> dict:
+        started = monotonic()
+        request_deadline = Deadline(self.config.request_deadline)
+        if deadline is not None and deadline.remaining() < request_deadline.remaining():
+            request_deadline = deadline
         self.last_model = None
         self.last_http_status = None
         self.last_error_code = None
         self.last_cost = None
+        self.last_latency_ms = 0.0
+        self.last_diagnostic = {}
         try:
-            return self._complete(messages, tools)
+            if request_deadline.expired:
+                raise ProviderError('REQUEST_DEADLINE_EXCEEDED')
+            result = self._complete(messages, tools, request_deadline)
+            if request_deadline.expired:
+                raise ProviderError('REQUEST_DEADLINE_EXCEEDED', self.last_http_status)
+            return result
         except ProviderError as error:
             self.last_error_code = error.code
             raise
         except (TimeoutError, socket.timeout):
-            self.last_error_code = "PROVIDER_TIMEOUT"
+            self.last_error_code = 'PROVIDER_TIMEOUT'
             raise ProviderError(self.last_error_code, self.last_http_status) from None
         except (URLError, OSError, ValueError, TypeError, RecursionError):
-            self.last_error_code = "PROVIDER_UNAVAILABLE"
+            self.last_error_code = 'PROVIDER_UNAVAILABLE'
             raise ProviderError(self.last_error_code, self.last_http_status) from None
+        finally:
+            self.last_latency_ms = round((monotonic() - started) * 1000, 3)
+            self.last_diagnostic = {
+                'http_status': self.last_http_status, 'returned_model': self.last_model,
+                'latency_ms': self.last_latency_ms, 'error_code': self.last_error_code,
+            }
 
-    def _complete(self, messages, tools):
+    def _complete(self, messages, tools, deadline):
         payload = {
             "model": self.config.model,
             "messages": messages,
             "tools": tools,
             "tool_choice": "auto",
             "stream": False,
-            "max_tokens": 2048,
+            "max_tokens": self.config.max_tokens,
             "provider": {
-                "allow_fallbacks": False,
+                "allow_fallbacks": self.config.provider_failover,
                 "require_parameters": True,
                 "max_price": {"prompt": 0, "completion": 0, "request": 0, "image": 0},
             },
@@ -74,22 +108,12 @@ class ChatClient:
         body = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
         if len(body) > MAX_REQUEST_BYTES:
             raise ProviderError("REQUEST_TOO_LARGE")
-        request = Request(
-            self.config.base_url + "/chat/completions", data=body, method="POST",
-            headers={"Authorization": "Bearer " + self.config.api_key,
-                     "Content-Type": "application/json", "Accept": "application/json"},
-        )
-        try:
-            with self._open(request, timeout=self.config.timeout) as response:
-                self.last_http_status = response.status
-                if response.status != 200:
-                    raise self._http_error(response.status)
-                raw = response.read(MAX_RESPONSE_BYTES + 1)
-        except HTTPError as error:
-            self.last_http_status = error.code
-            # Body and headers may echo credentials: never read or retain them.
-            error.close()
-            raise self._http_error(error.code) from None
+        if deadline.expired:
+            raise ProviderError('REQUEST_DEADLINE_EXCEEDED')
+        if self._open is None:
+            raw = self._isolated_request(body, deadline)
+        else:
+            raw = self._injected_request(body)
         if len(raw) > MAX_RESPONSE_BYTES:
             raise ProviderError("RESPONSE_TOO_LARGE", self.last_http_status)
         try:
@@ -144,18 +168,127 @@ class ChatClient:
             raise ProviderError("UNSAFE_RESPONSE", self.last_http_status)
         return result
 
+    def _injected_request(self, body):
+        """Trusted fake transport injection; not used by the production CLI."""
+        request = Request(
+            self.config.base_url + '/chat/completions', data=body, method='POST',
+            headers={'Authorization': 'Bearer ' + self.config.api_key,
+                     'Content-Type': 'application/json', 'Accept': 'application/json'},
+        )
+        try:
+            with self._open(request, timeout=self.config.timeout) as response:
+                self.last_http_status = response.status
+                if response.status != 200:
+                    raise self._http_error(response.status)
+                return response.read(MAX_RESPONSE_BYTES + 1)
+        except HTTPError as error:
+            self.last_http_status = error.code
+            error.close()
+            raise self._http_error(error.code) from None
+
+    def _isolated_request(self, body, deadline):
+        packet = json.dumps({'api_key': self.config.api_key, 'timeout': self.config.timeout,
+                             'body': body.decode('utf-8')}, ensure_ascii=False).encode('utf-8')
+        if len(packet) > MAX_IPC_INPUT:
+            raise ProviderError('REQUEST_TOO_LARGE')
+        if deadline.expired:
+            raise ProviderError('REQUEST_DEADLINE_EXCEEDED')
+        # Empty child env: no inherited provider credentials in /proc/.../environ.
+        # stderr is discarded, never collected or printed, even for startup failures.
+        process = None
+        mask = worker_process.block_spawn_signals()
+        try:
+            try:
+                process = subprocess.Popen(_worker_command(), stdin=subprocess.PIPE,
+                                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                           env={}, start_new_session=True)
+            finally:
+                # A queued turn alarm is delivered here, after the child has an owner.
+                worker_process.restore_spawn_signals(mask)
+            output = bytearray()
+            pending = memoryview(packet)
+            with selectors.DefaultSelector() as selector:
+                os.set_blocking(process.stdin.fileno(), False)
+                os.set_blocking(process.stdout.fileno(), False)
+                selector.register(process.stdin, selectors.EVENT_WRITE)
+                selector.register(process.stdout, selectors.EVENT_READ)
+                while selector.get_map():
+                    remaining = deadline.remaining()
+                    if remaining <= 0:
+                        raise ProviderError('REQUEST_DEADLINE_EXCEEDED', self.last_http_status)
+                    for key, _ in selector.select(remaining):
+                        if key.fileobj is process.stdin:
+                            try:
+                                count = os.write(process.stdin.fileno(), pending[:8192])
+                            except BrokenPipeError:
+                                pending = pending[:0]
+                            else:
+                                pending = pending[count:]
+                            if not pending:
+                                selector.unregister(process.stdin)
+                                try:
+                                    process.stdin.close()
+                                except OSError:
+                                    pass
+                        else:
+                            chunk = os.read(process.stdout.fileno(), 16384)
+                            if not chunk:
+                                selector.unregister(process.stdout)
+                                continue
+                            output.extend(chunk)
+                            if len(output) > MAX_IPC_OUTPUT:
+                                raise ProviderError('WORKER_PROTOCOL_ERROR')
+                            # Bounded metadata frame emitted as soon as headers arrive.
+                            first_line = output.partition(b'\n')[0]
+                            if b'\n' in output and self.last_http_status is None:
+                                try:
+                                    status = json.loads(first_line).get('http_status')
+                                except (ValueError, AttributeError):
+                                    raise ProviderError('WORKER_PROTOCOL_ERROR') from None
+                                if type(status) is int and 100 <= status <= 599:
+                                    self.last_http_status = status
+                try:
+                    process.wait(timeout=deadline.remaining())
+                except subprocess.TimeoutExpired:
+                    raise ProviderError('REQUEST_DEADLINE_EXCEEDED', self.last_http_status) from None
+            if deadline.expired:
+                raise ProviderError('REQUEST_DEADLINE_EXCEEDED', self.last_http_status)
+            if process.returncode != 0:
+                raise ProviderError('WORKER_PROTOCOL_ERROR', self.last_http_status)
+            try:
+                lines = output.splitlines()
+                if not 1 <= len(lines) <= 2:
+                    raise ValueError
+                result = json.loads(lines[-1])
+                status = result.get('http_status')
+                if status is not None and (type(status) is not int or not 100 <= status <= 599):
+                    raise ValueError
+                self.last_http_status = status
+                code = result.get('error_code')
+                if code is not None:
+                    if code not in _WORKER_CODES:
+                        raise ValueError
+                    raise ProviderError(code, status)
+                if status != 200 or not isinstance(result.get('body_b64'), str):
+                    raise ValueError
+                raw = base64.b64decode(result['body_b64'], validate=True)
+                if len(raw) > MAX_RESPONSE_BYTES:
+                    raise ProviderError('RESPONSE_TOO_LARGE', status)
+                return raw
+            except (ValueError, TypeError, AttributeError, KeyError):
+                raise ProviderError('WORKER_PROTOCOL_ERROR', self.last_http_status) from None
+        finally:
+            # Every exit path, including turn alarm / Ctrl-C, owns cleanup.
+            worker_process.terminate(process)
+
     def _http_error(self, status):
-        if status == 429:
-            code = "PROVIDER_RATE_LIMIT"
-        elif status in (401, 403):
-            code = "PROVIDER_AUTH"
-        elif 300 <= status < 400:
-            code = "PROVIDER_REDIRECT"
-        elif status >= 500:
-            code = "PROVIDER_UNAVAILABLE"
-        else:
-            code = "PROVIDER_HTTP_ERROR"
-        return ProviderError(code, status)
+        return ProviderError(http_error_code(status), status)
+
+
+_WORKER_CODES = frozenset({
+    'PROVIDER_RATE_LIMIT', 'PROVIDER_AUTH', 'PROVIDER_REDIRECT', 'PROVIDER_HTTP_ERROR',
+    'PROVIDER_UNAVAILABLE', 'PROVIDER_TIMEOUT', 'RESPONSE_TOO_LARGE', 'WORKER_PROTOCOL_ERROR',
+})
 
 
 def _contains_secret(value, secret: str) -> bool:
