@@ -1,0 +1,8 @@
+product_id,price_brl,name,category_id,description,stock_quantity,status,specs,created_at
+101,599.9,Yamaha C40 Nylon Natural,1,"Violão clássico com tampo em Spruce e fundo em Meranti.",5,active,"{""top"":""Spruce"",""back_sides"":""Meranti"",""strings"":""nylon""}",2021-03-15
+102,849,Kala KA-15 Soprano,2,"Modelo compacto com corpo em mahogany e som brilhante.",2,coming_soon,"{""top"":""Mahogany"",""body"":""Mahogany""}",2022-01-01
+103,199.99,Ibanez GSR200 Bass,1,"Contrabaixo de 4 cordas com captação split-coil e acabamento vermelho.",13,discontinued,"{""body"":""Ash"",""strings"":""4""}",2020-02-28
+104,799.9,Giannini GF-3D Dreadnought,1,"Violão dreadnought com volume alto e graves profundos.",0,active,"{""top"":""Spruce"",""color"":""Sunburst""}",2020-02-28
+105,159.9,Kala KA-ABP Barítono,2,"Modelo barítono com tampo sólido em cedro e som maduro.",1,active,"{""top"":""Cedro Sólido"",""scale"":""502mm""}",2025-05-15
+106,1200,Tagima TW-73,1,"Guitarra elétrica de corpo sólido com captação single-coil.",4,active,"{""body"":""Basswood"",""color"":""Black""}",2023-06-01
+107,250,Clarinete Student,3,"Clarinete de estudo em resina com chaves prateadas.",3,active,"{""key"":""Bb"",""material"":""Resina""}",2024-04-01
