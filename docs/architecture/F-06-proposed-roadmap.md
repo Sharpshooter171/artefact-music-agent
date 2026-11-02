@@ -2,10 +2,10 @@
 
 **Status:** PROPOSED ONLY — not approved, not implemented, no runtime changes
 **Date:** 2026-11-02 (BRT)
-**Baseline:** `feature/f05-latency-resilience` working tree over `main @ 2c7a7e57cb9eba566df9a75705eb2ed667e9fa5c`
-**Owner decision:** F-05 is the intended final submission candidate. F-06 is a
-documented future engineering roadmap only. No F-06 development is authorized by
-this document.
+**Baseline:** `main @ 0a5a8bcaede2e8631a71715c32a3f14449b3e005` (F-05 merged, PR #5)
+**Owner decision:** F-05 is approved with documented limitations and merged. F-06
+is a documented future engineering roadmap only. No F-06 development is
+authorized by this document.
 
 ## 1. Purpose
 

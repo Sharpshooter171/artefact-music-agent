@@ -31,12 +31,12 @@ promotions or an actual customer action.
 - **F-03 LLM orchestration and CLI:** implemented and verified.
 - **F-04 Evaluation and delivery:** implemented and verified; four authentic
   Portuguese conversations are retained.
-- **F-05 Latency, provider resilience and tool selection:** implemented locally
-  as a release candidate. Offline verification passes (633 tests). Owner-observed
-  real Nemotron outcomes are mixed: greeting, product search/price and policy
-  retrieval succeeded; budget recommendation returned `INVALID_ARGUMENT` and
-  category listing returned `GROUNDING_FAILED`. Gate V remains pending owner
-  approval.
+- **F-05 Latency, provider resilience and tool selection:** implemented,
+  approved with documented limitations, and merged in PR #5. Offline
+  verification passes (633 tests). Owner-observed real Nemotron outcomes are
+  mixed: greeting, product search/price and policy retrieval succeeded; budget
+  recommendation returned `INVALID_ARGUMENT` and category listing returned
+  `GROUNDING_FAILED`.
 - **F-06:** future proposals only. See
   [docs/architecture/F-06-proposed-roadmap.md](docs/architecture/F-06-proposed-roadmap.md).
   No F-06 runtime implementation exists.
@@ -378,13 +378,11 @@ limitations; generated code or prose alone is not treated as proof of success.
 ## Repository and delivery status
 
 Repository: [Sharpshooter171/music-store-ai-agent](https://github.com/Sharpshooter171/music-store-ai-agent).
-The public F-04 baseline is `main @ 2c7a7e57cb9eba566df9a75705eb2ed667e9fa5c`.
-F-05 exists as a local release candidate on branch
-`feature/f05-latency-resilience`; it is not committed, pushed or merged. Its
-Gate V review is pending owner approval. F-06 is documented only in
+The public F-05 release is `main @ 0a5a8bcaede2e8631a71715c32a3f14449b3e005`,
+merged from PR #5 with Gate V approved and documented limitations. F-06 is
+documented only in
 [docs/architecture/F-06-proposed-roadmap.md](docs/architecture/F-06-proposed-roadmap.md).
 
-Publishing or submitting the repository requires explicit owner authorization.
 See [F-05 verification](docs/verification/F-05-verification.md),
 [final delivery review](docs/verification/FINAL-DELIVERY-REVIEW.md) and the
 [delivery checklist](docs/verification/F-04-verification.md#delivery-checklist).
