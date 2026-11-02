@@ -261,9 +261,11 @@ limitations; generated code or prose alone is not treated as proof of success.
 ## Repository and delivery status
 
 Repository: [Sharpshooter171/music-store-ai-agent](https://github.com/Sharpshooter171/music-store-ai-agent).
-The reviewed baseline is `7baac223dd86ad51b0c28513210727dc4ad474a2`.
-F-04 documentation and examples are local changes awaiting human review;
-verification at a final merged F-04 commit remains pending. No submission has
-been made in this execution. Exact recruiter channel, filename and submission
-format remain pending confirmation; see the
+The reviewed F-04 planning baseline was
+`7baac223dd86ad51b0c28513210727dc4ad474a2`.
+This README and the examples are included in
+[PR #4](https://github.com/Sharpshooter171/music-store-ai-agent/pull/4).
+Final-commit reproduction is verified separately after merge.
+Publishing the repository does not constitute recruiter submission.
+See the
 [delivery checklist](docs/verification/F-04-verification.md#delivery-checklist).

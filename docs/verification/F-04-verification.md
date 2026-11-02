@@ -338,15 +338,6 @@ Observed `git status --short --branch`:
 ?? examples/
 ```
 
-`AGENTS.md`, the constitution and `.vscode/` were already changed/untrackedON.md
-?? .vscode/
-?? README.md
-?? docs/plans/F-04-implementation-plan.md
-?? docs/specs/F-04-evaluation-delivery.md
-?? docs/verification/F-04-verification.md
-?? examples/
-```
-
 `AGENTS.md`, the constitution and `.vscode/` were already changed/untracked at
 preflight and remain byte-identical to that state. `git diff --cached --name-only`
 returned no files. HEAD is unchanged. Ignored execution/build evidence remains
