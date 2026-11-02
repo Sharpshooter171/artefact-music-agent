@@ -52,7 +52,7 @@ class Orchestrator:
         self.registry = registry if registry is not None else ToolRegistry()
         self._clock = clock
         self._turn_seconds = (turn_deadline if turn_deadline is not None else
-                              getattr(getattr(client, "config", None), "turn_deadline", 45))
+                              getattr(getattr(client, "config", None), "turn_deadline", 120))
         # Only complete human/assistant exchanges survive between turns. Tool messages
         # stay in the current request loop, preventing orphan IDs and stale authority.
         self.history: list[dict] = []

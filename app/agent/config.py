@@ -36,8 +36,8 @@ class Config:
     model: str = FREE_MODEL
     base_url: str = OPENROUTER_BASE_URL
     timeout: float = 30
-    request_deadline: float = 20
-    turn_deadline: float = 45
+    request_deadline: float = 30
+    turn_deadline: float = 120
     max_tokens: int = 768
     provider_failover: bool = False
 
@@ -109,8 +109,8 @@ class Config:
             model=setting("EMPORIO_LLM_MODEL", "OPENROUTER_MODEL", FREE_MODEL),
             base_url=setting("EMPORIO_LLM_BASE_URL", "OPENROUTER_BASE_URL", OPENROUTER_BASE_URL),
             timeout=timeout,
-            request_deadline=number("EMPORIO_LLM_REQUEST_DEADLINE", "20", "INVALID_REQUEST_DEADLINE"),
-            turn_deadline=number("EMPORIO_LLM_TURN_DEADLINE", "45", "INVALID_TURN_DEADLINE"),
+            request_deadline=number("EMPORIO_LLM_REQUEST_DEADLINE", "30", "INVALID_REQUEST_DEADLINE"),
+            turn_deadline=number("EMPORIO_LLM_TURN_DEADLINE", "120", "INVALID_TURN_DEADLINE"),
             max_tokens=number("EMPORIO_LLM_MAX_TOKENS", "768", "INVALID_MAX_TOKENS", int),
             provider_failover=failover == "true",
         )
