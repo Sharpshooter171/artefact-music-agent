@@ -24,6 +24,23 @@ The interface is a local terminal. Catalog data is a **CSV snapshot**, and the
 manual is a **June 2025 document**. Neither establishes live inventory, current
 promotions or an actual customer action.
 
+## Feature status
+
+- **F-01 Data foundation and catalog tools:** implemented and verified.
+- **F-02 Policy retrieval:** implemented and verified.
+- **F-03 LLM orchestration and CLI:** implemented and verified.
+- **F-04 Evaluation and delivery:** implemented and verified; four authentic
+  Portuguese conversations are retained.
+- **F-05 Latency, provider resilience and tool selection:** implemented locally
+  as a release candidate. Offline verification passes (633 tests). Owner-observed
+  real Nemotron outcomes are mixed: greeting, product search/price and policy
+  retrieval succeeded; budget recommendation returned `INVALID_ARGUMENT` and
+  category listing returned `GROUNDING_FAILED`. Gate V remains pending owner
+  approval.
+- **F-06:** future proposals only. See
+  [docs/architecture/F-06-proposed-roadmap.md](docs/architecture/F-06-proposed-roadmap.md).
+  No F-06 runtime implementation exists.
+
 ## Run locally
 
 Requirements: **Python 3.11+**, `venv` and `pip`. Run the following commands from
@@ -96,8 +113,10 @@ The HTTP client uses OpenRouter's Chat Completions endpoint at
 to the also-approved **`openrouter/free`** router alias. Those are the only two
 accepted request model IDs; other models and endpoints are rejected locally.
 
-Every request disables provider fallback and sets zero price caps for prompt,
-completion, request and image pricing. There are no automatic HTTP retries or
+Every request sets zero price caps for prompt, completion, request and image
+pricing. Same-model provider failover is OFF by default; it can be enabled only
+with the explicit F-05 setting below and retains the exact model and free-only
+checks. The benchmark requires it OFF. There are no automatic HTTP retries or
 paid-model fallback. An explicit Nemotron request requires that same model ID in
 the response; the free-router alias may return a validated concrete `:free`
 model ID. Nonzero reported usage cost is rejected. These are application-level
@@ -106,9 +125,101 @@ controls; account billing was not independently audited.
 Configuration is read from process environment variables and a literal local
 `.env`; process settings take precedence. `OPENROUTER_API_KEY`,
 `OPENROUTER_MODEL` and `OPENROUTER_BASE_URL` are accepted aliases.
-`EMPORIO_LLM_TIMEOUT` accepts 1–30 seconds. Optional artifact overrides are
+`EMPORIO_LLM_TIMEOUT` accepts 1–30 seconds as an operation cap. Optional artifact overrides are
 `EMPORIO_CATALOG_DB` and `EMPORIO_POLICY_INDEX`. The dotenv reader does not run
 shell commands or expand variables.
+
+## F-05 deadlines, diagnostics and benchmark
+
+F-05 adds the following optional settings without changing an existing `.env`,
+configured model or authorized-model allowlist:
+
+| Setting | Default | Bounds |
+| --- | --- | --- |
+| `EMPORIO_LLM_REQUEST_DEADLINE` | 20 seconds | 1–30 seconds |
+| `EMPORIO_LLM_TURN_DEADLINE` | 45 seconds | 5–120 seconds; at least the request deadline |
+| `EMPORIO_LLM_MAX_TOKENS` | 768 | Integer, 128–2048 |
+| `EMPORIO_LLM_PROVIDER_FAILOVER` | `false` | Literal `true` / `false`; same model only |
+
+Each production HTTP request runs in a temporary standard-library subprocess.
+The caller supervises its wall-clock budget, kills and reaps it on timeout or
+interruption, and bounds IPC and response sizes. This can stop blocked DNS,
+connect and response reads. HTTPS certificate validation and redirect refusal
+remain enforced. The API key travels through private IPC, never command arguments
+or diagnostics. A temporary worker is created per request; no persistent service
+is installed. An explicitly injected `opener` is an offline testing seam; it
+preserves existing mocked-client behavior and is not the production cancellation
+mechanism.
+
+The CLI also enforces a total turn budget on its POSIX main thread, including
+local tool execution. Unsupported execution contexts fail closed rather than
+claiming a hard deadline. Expiry returns a safe pt-BR fallback and starts no
+further model request. OS scheduling and worker cleanup add a small tolerance;
+a shorter timeout can increase fallback rates. `--debug-tools` exposes bounded,
+allowlisted latency, HTTP status, validated model identity, request count and
+tool outcomes without printing prompts, customer text, arguments, bodies or keys.
+
+Run the synthetic benchmark offline from the repository root:
+
+```bash
+.venv/bin/python -m scripts.f05_benchmark
+.venv/bin/python -m pytest -q tests/test_f05_benchmark.py
+```
+
+Its default mode reads no `.env`, opens no network connection and writes only a
+sanitized JSON report to stdout. It exercises the actual orchestrator with
+scripted function calls and synthetic source envelopes for budget, availability,
+comparison, policy, combined, out-of-scope and follow-up scenarios. Fixture task
+assertions and the host grounding guard score factual completion; they do not
+establish arbitrary semantic truth. Synthetic tool dispatch reuses the production
+argument-validation contract, so malformed or out-of-range arguments return
+`INVALID_ARGUMENT` and cannot produce successful fixture evidence. Wrong tools or
+missing budget arguments do not count as successful task selection.
+
+The report separates end-to-end P50/P95 time (including failures), HTTP
+completion reliability, correct tool choice, grounded answer success, safe
+fallback behavior and final JSON compliance. HTTP success can coexist with
+invalid final JSON or failed grounding. Fallback scores evaluate failed turns;
+healthy turns are not counted as fallback successes. **Scripted measurements do
+not prove real latency, model quality or customer-service improvement.** A
+20-second timeout by itself proves no improvement in the customer experience.
+
+Real mode is implemented but **NOT AUTHORIZED in this F-05 round**. It requires
+separate explicit owner authorization for provider usage and the operator's
+`--real --authorize-real` assertion. It uses synthetic questions and fixture
+sources only, preserves the configured approved model, and refuses enabled
+provider failover. The shared cap is **12 HTTP requests TOTAL**, including failed
+requests across all scenarios in that run. No retries or paid fallback occur;
+429, authentication errors and non-free routing/cost evidence stop the run.
+
+Live mode defaults to a **bounded six-scenario subset requiring 11 scripted
+requests**: budget, policy, combined, out-of-scope, catalog follow-up and product
+details follow-up. The full eight-turn set requires 15, so it is not the default.
+Use `--scenarios name1,name2` for an explicit canonical-order subset and
+`--list-scenarios` to inspect names and request estimates without reading `.env`
+or contacting a provider. Every report lists `selected_scenarios`,
+`skipped_scenarios`, `skipped_scenario_reasons` and `planned_http_requests`;
+omitted or cap-truncated scenarios are never silent. A turn stopped mid-scenario
+by the cap has `execution_status: interrupted`. Select `follow_up_catalog` together
+with `follow_up_details`; a details follow-up without its preceding catalog context
+is refused before configuration or network use. Estimates describe the scripted
+fixture path; a live model can need more requests and will still stop at the cap.
+The cap is per invocation:
+an authorized evaluation must not restart the script or run another model to
+exceed the owner's total budget.
+
+`nvidia/nemotron-3.5-lightning:free` and `google/gemma-4-26b-a4b-it:free` remain
+documentation-only candidates. Neither is allowlisted or a runtime default.
+Before any separately authorized evaluation, recheck model IDs, free pricing,
+function-calling support and provider terms. A candidate must demonstrate catalog
+searches, policy lookup, function calling, grounded answers and final JSON
+compliance before the owner considers selection.
+
+Free-provider routing provides no application-level guarantee against retention,
+logging or use for provider improvement. Zero price does not imply zero retention
+or exclusion from training. Provider-specific terms can differ and must be checked
+before live use. Benchmarks may contain only synthetic customer questions; never
+submit real customer records, secrets or sensitive conversations.
 
 ## Architecture and tool calling
 
@@ -187,7 +298,13 @@ Python 3.12.12 independently installed dependencies, rebuilt both artifacts,
 passed the same **448 tests**, passed `pip check` and ran `python -m app --help`
 successfully. No private `.env`, key or prebuilt artifact was copied into that
 clone. See the F-04 report for exact commands, timings, the official acceptance
-matrix and the pending reproduction at the final F-04 commit after merge.
+matrix and the reproduction at the final F-04 commit.
+
+F-05 re-ran the complete suite: **633 passed, 0 failed, 0 skipped** on Python
+3.14.4. This includes 448 pre-existing tests plus 185 F-05 tests. The F-05
+benchmark remains offline by default; real mode is implemented but not authorized.
+See [F-05 verification](docs/verification/F-05-verification.md) for exact
+commands, the acceptance mapping and the owner-observed real Nemotron outcomes.
 
 The additional F-04 catalog conversation reached the model and retrieved products,
 but its final answer failed the grounding guard and became a safe fallback. The
@@ -261,11 +378,13 @@ limitations; generated code or prose alone is not treated as proof of success.
 ## Repository and delivery status
 
 Repository: [Sharpshooter171/music-store-ai-agent](https://github.com/Sharpshooter171/music-store-ai-agent).
-The reviewed F-04 planning baseline was
-`7baac223dd86ad51b0c28513210727dc4ad474a2`.
-This README and the examples are included in
-[PR #4](https://github.com/Sharpshooter171/music-store-ai-agent/pull/4).
-Final-commit reproduction is verified separately after merge.
-Publishing the repository does not constitute recruiter submission.
-See the
+The public F-04 baseline is `main @ 2c7a7e57cb9eba566df9a75705eb2ed667e9fa5c`.
+F-05 exists as a local release candidate on branch
+`feature/f05-latency-resilience`; it is not committed, pushed or merged. Its
+Gate V review is pending owner approval. F-06 is documented only in
+[docs/architecture/F-06-proposed-roadmap.md](docs/architecture/F-06-proposed-roadmap.md).
+
+Publishing or submitting the repository requires explicit owner authorization.
+See [F-05 verification](docs/verification/F-05-verification.md),
+[final delivery review](docs/verification/FINAL-DELIVERY-REVIEW.md) and the
 [delivery checklist](docs/verification/F-04-verification.md#delivery-checklist).
