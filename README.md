@@ -31,16 +31,19 @@ promotions or an actual customer action.
 - **F-03 LLM orchestration and CLI:** implemented and verified.
 - **F-04 Evaluation and delivery:** implemented and verified; four authentic
   Portuguese conversations are retained.
-- **F-05 Latency, provider resilience and tool selection:** implemented,
-  approved with documented limitations, and merged in PR #5. Offline
-  verification passes (633 tests). Owner-observed real Nemotron outcomes are
-  mixed: greeting, product search/price and policy retrieval succeeded; budget
-  recommendation returned `INVALID_ARGUMENT` and category listing returned
-  `GROUNDING_FAILED`.
-- **F-06A Catalog retrieval and grounding reliability:** local implementation
-  and offline verification complete; **Gate V pending human review**. Supported
-  BRL punctuation, bounded customer-budget provenance and complete scoped
-  minimum checks have regression coverage. No real-model run was performed.
+- **F-05 Latency, provider resilience and tool selection:** implemented and
+  merged in PR #5 with documented limitations. The F-05-stage offline suite
+  passed 633 tests. Historical real Nemotron runs showed both successful
+  catalog/policy interactions and `INVALID_ARGUMENT`/`GROUNDING_FAILED`
+  failures; their exact rejected provider outputs were not retained.
+- **F-06A Catalog retrieval and grounding reliability:** Gate V approved by
+  the owner and merged in [PR #8](https://github.com/Sharpshooter171/music-store-ai-agent/pull/8)
+  (runtime merge `36f5908e86c9827b85b89d4a35254f414b06fe09`).
+  Offline verification reported **736 passed, 0 failed, 0 skipped**:
+  punctuation-aware BRL price validation, strict customer-budget provenance
+  and scoped minimum-price checks. Post-merge live answer quality remains
+  **unverified**: the attempted Nemotron smoke request returned HTTP 429
+  without calling a catalog or policy tool.
 - **Other F-06 workstreams:** future proposals only. See
   [docs/architecture/F-06-proposed-roadmap.md](docs/architecture/F-06-proposed-roadmap.md).
 
@@ -317,6 +320,15 @@ minimum claim and accepted the correct R$ 429,90 minimum from both complete
 33-product query/category searches. This is local retrieval/guard evidence,
 not live model-quality evidence. See [F-06A verification](docs/verification/F-06A-verification.md).
 
+**Post-merge live observation (2026-11-02):** the first free Nemotron
+smoke question, `Olá, vocês vendem baterias?`, received **HTTP 429**
+(`PROVIDER_RATE_LIMIT`) after one HTTP request. The CLI returned its safe
+rate-limit fallback. A separate read-only OpenRouter key quota query returned
+`used=59`, `limit=50`, `remaining=0`. No catalog/policy tool ran on
+that question, and the remaining planned smoke questions were not executed.
+This validates rate-limit handling, **not F-06A answer-quality improvement**.
+The quota observation is operator-supplied, not an independent billing audit.
+
 The additional F-04 catalog conversation reached the model and retrieved products,
 but its final answer failed the grounding guard and became a safe fallback. The
 four retained recordings include that failure and three historical conversations;
@@ -335,7 +347,10 @@ evidence and are not part of `pytest`.
 ## Limitations and data handling
 
 - Free inference can be unavailable, rate limited or incompatible with required
-  tool parameters. Successful historical runs do not guarantee future service.
+  tool parameters. On 2026-11-02, the post-merge live attempt hit HTTP 429
+  with the key's free daily quota exhausted. Historical successful responses
+  do not establish post-F-06A model reliability. No paid inference or
+  alternate provider was used to bypass this limit.
 - Catalog search has no stemming or semantic similarity. Exact categories,
   spelling and the default result limit affect retrieval. Policy retrieval is
   tailored to the supplied manual; replacing that PDF requires an explicit
@@ -401,12 +416,17 @@ limitations; generated code or prose alone is not treated as proof of success.
 ## Repository and delivery status
 
 Repository: [Sharpshooter171/music-store-ai-agent](https://github.com/Sharpshooter171/music-store-ai-agent).
-The public F-05 release is `main @ 0a5a8bcaede2e8631a71715c32a3f14449b3e005`,
-merged from PR #5 with Gate V approved and documented limitations. Other F-06
-workstreams remain proposed in
+The latest verified runtime feature merge is
+[PR #8](https://github.com/Sharpshooter171/music-store-ai-agent/pull/8),
+`36f5908e86c9827b85b89d4a35254f414b06fe09`, which incorporated the
+owner-approved F-06A reliability corrections. F-05 was previously merged in
+PR #5 and the timeout-default hotfix in PR #7.
+The four authentic real-model conversation recordings remain unchanged;
+post-F-06A real conversational success has **not** been demonstrated due
+to the free-provider HTTP 429. Other F-06 workstreams remain proposals:
 [docs/architecture/F-06-proposed-roadmap.md](docs/architecture/F-06-proposed-roadmap.md).
-F-06A is an authorized local change against `6d83c45484d31284fc6653b72d5b77c07ed6a888`,
-pending human Gate V review; it has not been committed or published by this work.
+The repository must not be modified after the official application submission.
+This README does not assert that submission has occurred.
 
 See [F-05 verification](docs/verification/F-05-verification.md),
 [final delivery review](docs/verification/FINAL-DELIVERY-REVIEW.md) and the
