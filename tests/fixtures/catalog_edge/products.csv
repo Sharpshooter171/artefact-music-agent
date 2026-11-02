@@ -1,0 +1,4 @@
+product_id,price_brl,name,category_id,description,stock_quantity,status,specs,created_at
+201,10,Violão  Clássico,1,"Corda de algodão com acabamento natural.",1,active,"{""top"":""Pinho""}",2024-01-01
+202,20,Violao Classico,1,"Cópia duplicada para aviso de nome.",1,active,"{""top"":""Cedro""}",2024-01-02
+203,30,Corda 100%,2,"Acessório com 100% de algodão e texto x' OR '1'='1.",1,active,"{""material"":""Algodão""}",2024-01-03
