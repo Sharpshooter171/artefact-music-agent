@@ -348,3 +348,250 @@ def test_detail_and_category_successful_model_protocol(name, result, text):
     assert agent.last_error_code is None
     assert client.requests[1][0][-1]["role"] == "tool"
     assert json.loads(client.requests[1][0][-1]["content"]) == result
+
+# F-05 deadline and observation regression tests use synthetic inputs only.
+def test_f05_turn_deadline_stops_second_request_and_discards_late_facts():
+    class SlowClockClient(FakeClient):
+        def complete(self, messages, tools):
+            result = super().complete(messages, tools)
+            clock[0] += 0.2
+            return result
+
+    clock = [0.0]
+    client = SlowClockClient(calls("search_products"), final("Preço R$ 599,90.", sources=["search_products"]))
+    registry = FakeRegistry()
+    agent = Orchestrator(client, registry, clock=lambda: clock[0], turn_deadline=0.1)
+    assert "599,90" not in agent.reply("Pergunta sintética")
+    assert agent.last_error_code == "TURN_DEADLINE_EXCEEDED"
+    assert len(client.requests) == 1
+    assert registry.dispatched == []
+    assert agent.last_turn["deadline_state"] == "expired"
+
+
+def test_f05_actual_blocking_tool_is_cancelled_by_turn_deadline():
+    import time
+
+    class BlockingRegistry(FakeRegistry):
+        def dispatch(self, name, arguments):
+            time.sleep(10)
+            raise AssertionError("late tool must not finish")
+
+    client = FakeClient(calls("search_products"))
+    agent = Orchestrator(client, BlockingRegistry(), turn_deadline=0.15)
+    started = time.monotonic()
+    assert "equipe" in agent.reply("Pergunta sintética")
+    assert 0.10 <= time.monotonic() - started < 0.8
+    assert agent.last_error_code == "TURN_DEADLINE_EXCEEDED"
+    assert len(client.requests) == 1
+
+
+def test_f05_turn_expiry_after_tool_prevents_second_model_request():
+    clock = [0.0]
+
+    class DelayedRegistry(FakeRegistry):
+        def dispatch(self, name, arguments):
+            result = super().dispatch(name, arguments)
+            clock[0] += 2
+            return result
+
+    client = FakeClient(calls("search_products"))
+    registry = DelayedRegistry()
+    agent = Orchestrator(client, registry, clock=lambda: clock[0], turn_deadline=1)
+    agent.reply("Pergunta sintética")
+    assert agent.last_error_code == "TURN_DEADLINE_EXCEEDED"
+    assert len(client.requests) == 1
+    assert len(registry.dispatched) == 1
+
+
+def test_f05_remaining_turn_budget_passed_to_client():
+    class BoundedClient(FakeClient):
+        def complete_with_deadline(self, messages, tools, deadline):
+            assert 0 < deadline.remaining() <= 1
+            return self.complete(messages, tools)
+
+    agent = Orchestrator(BoundedClient(final("Olá", "greeting")), FakeRegistry(), turn_deadline=1)
+    assert "Olá" in agent.reply("Olá")
+    assert agent.last_turn["request_count"] == 1
+
+
+@pytest.mark.parametrize("code", ["REQUEST_DEADLINE_EXCEEDED", "TURN_DEADLINE_EXCEEDED"])
+def test_f05_deadline_error_maps_to_sanitized_fallback(code):
+    from app.agent.llm_client import ProviderError
+
+    agent = Orchestrator(FakeClient(ProviderError(code)), FakeRegistry())
+    assert "equipe" in agent.reply("Pergunta sintética")
+    assert agent.last_error_code == code
+
+
+def test_f05_diagnostics_drop_untrusted_metadata():
+    class MetadataClient(FakeClient):
+        last_diagnostic = {"http_status": 200, "returned_model": "PRIVATE_CUSTOMER", "latency_ms": 1,
+                           "error_code": "PRIVATE_CUSTOMER", "body": "PRIVATE_CUSTOMER"}
+        last_model = "PRIVATE_CUSTOMER"
+        last_http_status = 200
+        last_latency_ms = 1
+
+    agent = Orchestrator(MetadataClient(final("Olá", "greeting")), FakeRegistry())
+    agent.reply("PRIVATE_CUSTOMER")
+    diagnostics = json.dumps({"requests": agent.last_requests, "turn": agent.last_turn})
+    assert "PRIVATE_CUSTOMER" not in diagnostics
+    assert agent.last_requests[0]["http_status"] == 200
+    assert agent.last_final_json_compliant is True
+
+
+def test_f05_json_compliance_is_separate_from_grounding_success():
+    agent = Orchestrator(FakeClient(final("Preço inventado R$ 9,99", sources=["search_products"])), FakeRegistry())
+    agent.reply("Pergunta sintética")
+    assert agent.last_final_json_compliant is True
+    assert agent.last_error_code == "GROUNDING_FAILED"
+
+
+def test_f05_prompt_semantic_budget_policy_and_function_guidance():
+    from app.agent.prompt import SYSTEM_PROMPT
+    from app.agent.tool_registry import TOOL_SCHEMAS
+
+    assert 'price_max_cents=50000' in SYSTEM_PROMPT
+    assert 'list_categories' in SYSTEM_PROMPT and 'etapa obrigatória' in SYSTEM_PROMPT
+    descriptions = {tool['function']['name']: tool['function']['description'] for tool in TOOL_SCHEMAS}
+    assert 'orçamento' in descriptions['search_products']
+    assert 'comparar' in descriptions['search_products']
+    assert 'descobrir categorias' in descriptions['list_categories']
+    assert 'especificações' in descriptions['get_product_details']
+    assert 'PIX' in descriptions['search_store_policies']
+
+
+def test_f05_turn_guard_fails_closed_on_non_main_thread():
+    import threading
+
+    client = FakeClient(final("Olá", "greeting"))
+    agent = Orchestrator(client, FakeRegistry())
+    thread = threading.Thread(target=agent.reply, args=("Pergunta sintética",))
+    thread.start()
+    thread.join(timeout=1)
+    assert not thread.is_alive()
+    assert client.requests == []
+    assert agent.last_error_code == "TURN_DEADLINE_UNAVAILABLE"
+
+
+def test_f05_turn_guard_preserves_existing_later_alarm():
+    import signal
+    import time
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.getitimer(signal.ITIMER_REAL)
+    handler = lambda *_: None
+    signal.signal(signal.SIGALRM, handler)
+    signal.setitimer(signal.ITIMER_REAL, 3)
+    try:
+        before = time.monotonic()
+        agent = Orchestrator(FakeClient(final("Olá", "greeting")), FakeRegistry(), turn_deadline=0.1)
+        agent.reply("Olá")
+        elapsed = time.monotonic() - before
+        remaining, interval = signal.getitimer(signal.ITIMER_REAL)
+        assert signal.getsignal(signal.SIGALRM) is handler
+        assert 0 < remaining <= 3 - elapsed + 0.01
+        assert interval == 0
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        signal.setitimer(signal.ITIMER_REAL, *previous_timer)
+
+
+def test_f05_turn_guard_declines_to_postpone_earlier_alarm():
+    import signal
+
+    previous_timer = signal.getitimer(signal.ITIMER_REAL)
+    signal.setitimer(signal.ITIMER_REAL, 2)
+    try:
+        client = FakeClient(final("Olá", "greeting"))
+        agent = Orchestrator(client, FakeRegistry(), turn_deadline=3)
+        agent.reply("Olá")
+        assert agent.last_error_code == "TURN_DEADLINE_UNAVAILABLE"
+        assert client.requests == []
+        assert 0 < signal.getitimer(signal.ITIMER_REAL)[0] <= 2
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.setitimer(signal.ITIMER_REAL, *previous_timer)
+
+
+def test_f05_actual_blocking_model_call_is_cancelled_and_no_second_call():
+    import time
+
+    class BlockingClient(FakeClient):
+        def complete(self, messages, tools):
+            self.requests.append((None, None))
+            time.sleep(10)
+            raise AssertionError("late model must not finish")
+
+    client = BlockingClient()
+    agent = Orchestrator(client, FakeRegistry(), turn_deadline=0.15)
+    started = time.monotonic()
+    agent.reply("Pergunta sintética")
+    assert 0.10 <= time.monotonic() - started < 0.8
+    assert agent.last_error_code == "TURN_DEADLINE_EXCEEDED"
+    assert len(client.requests) == 1
+    assert agent.last_turn["request_count"] == 1
+    assert len(agent.history) == 2
+
+
+def test_f05_deadline_reports_cancelled_tool_without_arguments_or_results():
+    import time
+
+    class BlockingRegistry(FakeRegistry):
+        def dispatch(self, name, arguments):
+            time.sleep(10)
+
+    agent = Orchestrator(FakeClient(calls("search_products")), BlockingRegistry(), turn_deadline=0.1)
+    agent.reply("PRIVATE_QUESTION")
+    assert agent.last_trace == [{"tool": "search_products", "ok": False, "error_code": "TURN_DEADLINE_EXCEEDED"}]
+    assert agent.last_tool_diagnostics[0]["name"] == "search_products"
+    assert agent.last_tool_diagnostics[0]["duration_ms"] >= 50
+    assert "PRIVATE_QUESTION" not in json.dumps(agent.last_tool_diagnostics)
+
+
+def test_f05_turn_deadline_kills_and_reaps_actual_http_worker(monkeypatch):
+    import os
+    import sys
+    import time
+    from app.agent import llm_client
+    from app.agent.config import Config
+
+    children = []
+    original_popen = llm_client.subprocess.Popen
+
+    def tracked_popen(*args, **kwargs):
+        process = original_popen(*args, **kwargs)
+        children.append(process)
+        return process
+
+    monkeypatch.setattr(llm_client.subprocess, "Popen", tracked_popen)
+    monkeypatch.setattr(llm_client, "_worker_command", lambda: [sys.executable, "-I", "-c",
+        "import sys,time; sys.stdin.buffer.read(); time.sleep(10)"])
+    agent = Orchestrator(llm_client.ChatClient(Config("synthetic-only-key")), FakeRegistry(), turn_deadline=0.2)
+    started = time.monotonic()
+    agent.reply("Pergunta sintética")
+    assert time.monotonic() - started < 0.8
+    assert agent.last_error_code == "TURN_DEADLINE_EXCEEDED"
+    assert agent.last_requests[0]["error_code"] == "TURN_DEADLINE_EXCEEDED"
+    assert len(children) == 1
+    assert children[0].poll() is not None
+    with pytest.raises(ChildProcessError):
+        os.waitpid(children[0].pid, os.WNOHANG)
+
+
+def test_f05_orchestrator_prefers_killable_tool_deadline_adapter():
+    class BoundedRegistry(FakeRegistry):
+        def dispatch(self, name, arguments):
+            raise AssertionError('unbounded dispatch must not run')
+
+        def dispatch_with_deadline(self, name, arguments, deadline):
+            assert deadline.remaining() > 0
+            self.dispatched.append((name, arguments))
+            return copy.deepcopy(CATALOG)
+
+    registry = BoundedRegistry()
+    client = FakeClient(calls('search_products'), final('Ukulele por R$ 599,90.', sources=['search_products']))
+    agent = Orchestrator(client, registry)
+    assert '599,90' in agent.reply('Pergunta sintética')
+    assert len(registry.dispatched) == 1
+    assert agent.last_error_code is None

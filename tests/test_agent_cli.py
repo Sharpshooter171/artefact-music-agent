@@ -189,3 +189,34 @@ def test_bad_catalog_is_not_recreated(tmp_path, monkeypatch, capsys, catalog_sta
     output = capsys.readouterr().out
     assert "build_catalog" in output
     assert str(tmp_path) not in output
+
+
+def test_f05_debug_prints_safe_operational_metadata(capsys):
+    agent = SimpleNamespace(last_trace=[], last_error_code="REQUEST_DEADLINE_EXCEEDED",
+        last_requests=[{"http_status": 503, "returned_model": "nvidia/nemotron-3-ultra-550b-a55b:free",
+                        "latency_ms": 24.5, "error_code": "PROVIDER_UNAVAILABLE", "body": "PRIVATE"}],
+        last_turn={"duration_ms": 25, "request_count": 1, "deadline_state": "expired", "error_code": "PRIVATE"})
+    cli._print_debug(agent)
+    text = capsys.readouterr().out
+    assert "503" in text and "24.5" in text
+    assert "nvidia/nemotron-3-ultra-550b-a55b:free" in text
+    assert "REQUEST_DEADLINE_EXCEEDED" in text
+    assert "PRIVATE" not in text
+
+
+def test_f05_debug_rejects_untrusted_operational_fields(capsys):
+    agent = SimpleNamespace(last_trace=[], last_error_code="PRIVATE",
+        last_requests=[{"http_status": "PRIVATE", "returned_model": "PRIVATE", "latency_ms": "PRIVATE",
+                        "error_code": "PRIVATE"}],
+        last_turn={"duration_ms": "PRIVATE", "request_count": "PRIVATE", "deadline_state": "PRIVATE"})
+    cli._print_debug(agent)
+    assert "PRIVATE" not in capsys.readouterr().out
+
+
+def test_f05_debug_handles_unhashable_and_oversized_diagnostics(capsys):
+    agent = SimpleNamespace(last_trace=[{"tool": [], "error_code": {}}] * 100,
+        last_error_code=[], last_requests=[{"http_status": {}, "returned_model": [],
+                                          "latency_ms": [], "error_code": {}}] * 100,
+        last_turn={"duration_ms": {}, "request_count": [], "deadline_state": []})
+    cli._print_debug(agent)
+    assert len(capsys.readouterr().out) < 1000

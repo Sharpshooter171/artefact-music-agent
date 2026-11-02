@@ -6,7 +6,8 @@ import argparse
 
 from app.agent.config import Config, ConfigError
 from app.agent.llm_client import ChatClient
-from app.agent.orchestrator import Orchestrator
+from app.agent.orchestrator import Orchestrator, safe_milliseconds, safe_model_identity
+from app.agent.tool_registry import TOOL_ERROR_CODES
 from app.catalog.tools import list_categories
 from app.policy.tools import search_store_policies
 
@@ -28,7 +29,9 @@ _ERRORS = frozenset({
     "UNAUTHORIZED_RESPONSE_MODEL", "INVALID_PROVIDER_COST", "NONZERO_PROVIDER_COST",
     "INCOMPLETE_RESPONSE", "UNSAFE_RESPONSE", "PROVIDER_RATE_LIMIT",
     "PROVIDER_AUTH", "PROVIDER_REDIRECT", "PROVIDER_HTTP_ERROR",
-})
+    "REQUEST_DEADLINE_EXCEEDED", "TURN_DEADLINE_EXCEEDED", "TURN_DEADLINE_UNAVAILABLE",
+    "WORKER_PROTOCOL_ERROR",
+}) | TOOL_ERROR_CODES
 
 
 def _artifacts_ready() -> bool:
@@ -46,7 +49,8 @@ def _artifacts_ready() -> bool:
 
 def _print_debug(agent: Orchestrator) -> None:
     """Never interpolate arbitrary provider/tool content in diagnostic output."""
-    for event in agent.last_trace:
+    trace = getattr(agent, "last_trace", [])
+    for event in trace[:6] if isinstance(trace, list) else []:
         if isinstance(event, str):
             name, code = event, None
         elif isinstance(event, dict):
@@ -58,6 +62,47 @@ def _print_debug(agent: Orchestrator) -> None:
             print(f"[ferramenta: {name}]")
         if isinstance(code, str) and code in _ERRORS:
             print(f"[erro: {code}]")
+    tool_diagnostics = getattr(agent, "last_tool_diagnostics", [])
+    for event in tool_diagnostics[:6] if isinstance(tool_diagnostics, list) else []:
+        if not isinstance(event, dict):
+            continue
+        name, duration = event.get("name"), safe_milliseconds(event.get("duration_ms"))
+        if isinstance(name, str) and name in _TOOLS and duration is not None:
+            print(f"[ferramenta: {name}, duration_ms={duration}]")
+    requests = getattr(agent, "last_requests", [])
+    for event in requests[:4] if isinstance(requests, list) else []:
+        if not isinstance(event, dict):
+            continue
+        fields = []
+        status = event.get("http_status")
+        if type(status) is int and 100 <= status <= 599:
+            fields.append(f"HTTP={status}")
+        latency = safe_milliseconds(event.get("latency_ms"))
+        if latency is not None:
+            fields.append(f"latency_ms={latency}")
+        secret = getattr(getattr(getattr(agent, "client", None), "config", None), "api_key", None)
+        model = safe_model_identity(event.get("returned_model"), secret)
+        if model:
+            fields.append(f"model={model}")
+        code = event.get("error_code")
+        if isinstance(code, str) and code in _ERRORS:
+            fields.append(f"error={code}")
+        if fields:
+            print("[requisição: " + ", ".join(fields) + "]")
+    turn = getattr(agent, "last_turn", {})
+    if isinstance(turn, dict):
+        fields = []
+        duration = safe_milliseconds(turn.get("duration_ms"))
+        if duration is not None:
+            fields.append(f"duration_ms={duration}")
+        count = turn.get("request_count")
+        if type(count) is int and 0 <= count <= 4:
+            fields.append(f"request_count={count}")
+        state = turn.get("deadline_state")
+        if isinstance(state, str) and state in {"expired", "within_budget", "unavailable"}:
+            fields.append(f"deadline={state}")
+        if fields:
+            print("[turno: " + ", ".join(fields) + "]")
     code = getattr(agent, "last_error_code", None)
     if isinstance(code, str) and code in _ERRORS:
         print(f"[erro: {code}]")
@@ -65,7 +110,7 @@ def _print_debug(agent: Orchestrator) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Assistente virtual do Empório da Música.")
-    parser.add_argument("--debug-tools", action="store_true", help="Mostrar nomes de ferramentas e códigos de erro sanitizados.")
+    parser.add_argument("--debug-tools", action="store_true", help="Mostrar ferramentas, latência, HTTP, modelo e erros sanitizados.")
     args = parser.parse_args(argv)
     try:
         config = Config.from_env()

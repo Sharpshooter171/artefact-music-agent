@@ -283,3 +283,32 @@ def test_no_network_on_config_or_client_construction(monkeypatch):
         pytest.fail("network unexpectedly called")
     monkeypatch.setattr("urllib.request.OpenerDirector.open", forbidden)
     ChatClient(configuration())
+
+
+@pytest.mark.parametrize('enabled', [False, True])
+def test_f05_provider_failover_keeps_exact_model_and_zero_cost(enabled):
+    from dataclasses import replace
+    config = replace(configuration(EMPORIO_LLM_MODEL=NEMOTRON_FREE_MODEL),
+                     provider_failover=enabled, max_tokens=768)
+    client, captured = make_client(envelope(model=NEMOTRON_FREE_MODEL), config=config)
+    client.complete([], [])
+    payload = json.loads(captured[0][0].data)
+    assert payload['model'] == NEMOTRON_FREE_MODEL
+    assert payload['provider'] == {
+        'allow_fallbacks': enabled, 'require_parameters': True,
+        'max_price': {'prompt': 0, 'completion': 0, 'request': 0, 'image': 0},
+    }
+    assert payload['max_tokens'] == 768
+    assert 'models' not in payload
+
+
+def test_f05_client_metadata_is_bounded_and_contains_no_customer_text():
+    client, _ = make_client()
+    customer_text = 'synthetic-private-question-do-not-log'
+    client.complete([{'role': 'user', 'content': customer_text}], [])
+    observation = client.last_diagnostic
+    assert set(observation) == {'http_status', 'returned_model', 'latency_ms', 'error_code'}
+    assert observation['http_status'] == 200
+    assert observation['latency_ms'] >= 0
+    assert customer_text not in repr(observation)
+    assert KEY not in repr(observation)
