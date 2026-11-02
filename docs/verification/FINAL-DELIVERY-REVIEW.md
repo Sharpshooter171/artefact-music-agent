@@ -327,3 +327,17 @@ Consequences for this review record:
   development is started.
 - Gate V remains **PENDING OWNER APPROVAL**; no commit, push, PR, merge or
   submission is performed.
+
+## FINAL RELEASE ADDENDUM — 2026-11-02
+
+- Owner Gate V approval: **APPROVED WITH DOCUMENTED LIMITATIONS**.
+- F-05 incremental commits: `83606d4`, `1afbfca`, `e3cc50a`.
+- PR #5 merged into `main`.
+- Final public main SHA: `0a5a8bcaede2e8631a71715c32a3f14449b3e005`.
+- Independent clean-clone reproduction passed with 633 tests.
+- Known live limitations unchanged: mixed real Nemotron outcomes, including
+  `INVALID_ARGUMENT` for budget recommendation and `GROUNDING_FAILED` for
+  category listing; no comparative latency or live completion-improvement claim.
+
+This addendum records the post-merge documentation state. Historical verification
+observations above are preserved as originally recorded.
